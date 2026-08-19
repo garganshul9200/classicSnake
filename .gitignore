@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+
+# Android signing — never commit real keystores
+android/keystore.properties
+android/release.keystore
+*.keystore
+*.jks
