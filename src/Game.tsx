@@ -2,9 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { Joystick } from './Joystick';
+import { BannerAd } from './components/BannerAd';
+import {
+  prepareInterstitialAd,
+  showInterstitialAd,
+  tickPlaytime,
+} from './ads/admob';
+import { INTERSTITIAL_EVERY_GAMES } from './ads/config';
+import { useOnline } from './hooks/useOnline';
 
 // ============================================================================
-// NEON SERPENT — a smooth-curve snake remix
+// Snake Line — classic arcade snake for Android
 // ============================================================================
 
 type GameState = 'menu' | 'playing' | 'paused' | 'gameover' | 'scores';
@@ -65,7 +73,9 @@ const ORB_R = 10;
 const HEAD_R = 12;
 const BODY_R = 9;
 
-const SCORE_KEY = 'neon-serpent-hiscores-v1';
+const SCORE_KEY = 'snake-line-hiscores-v1';
+const GAMES_SINCE_AD_KEY = 'snake-line-games-since-ad';
+const MAX_HIGH_SCORES = 8;
 
 // ----- Utilities -------------------------------------------------------------
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -84,7 +94,7 @@ function loadHighScores(): HighScore[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => typeof x?.score === 'number').slice(0, 10);
+    return parsed.filter((x) => typeof x?.score === 'number').slice(0, MAX_HIGH_SCORES);
   } catch {
     return [];
   }
@@ -94,7 +104,7 @@ function saveHighScore(score: number): HighScore[] {
   const list = loadHighScores();
   list.push({ score, date: new Date().toISOString() });
   list.sort((a, b) => b.score - a.score);
-  const top = list.slice(0, 10);
+  const top = list.slice(0, MAX_HIGH_SCORES);
   try {
     localStorage.setItem(SCORE_KEY, JSON.stringify(top));
   } catch {
@@ -109,6 +119,7 @@ function saveHighScore(score: number): HighScore[] {
 export default function Game() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const online = useOnline();
 
   const [state, setState] = useState<GameState>('menu');
   const [score, setScore] = useState(0);
@@ -119,12 +130,31 @@ export default function Game() {
   });
   const [highScores, setHighScores] = useState<HighScore[]>(() => loadHighScores());
   const [newBest, setNewBest] = useState(false);
+  const [bannerOn, setBannerOn] = useState(true);
+  const gamesSinceAdRef = useRef(0);
 
   // Mutable refs used inside the render loop
   const stateRef = useRef<GameState>('menu');
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Pause gameplay while offline so the run doesn't continue under OfflineGate.
+  useEffect(() => {
+    if (!online && stateRef.current === 'playing') {
+      setState('paused');
+    }
+  }, [online]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(GAMES_SINCE_AD_KEY);
+      const n = raw ? parseInt(raw, 10) : 0;
+      gamesSinceAdRef.current = Number.isFinite(n) ? n : 0;
+    } catch {
+      gamesSinceAdRef.current = 0;
+    }
+  }, []);
 
   const scoreRef = useRef(0);
   const comboRef = useRef(1);
@@ -184,6 +214,29 @@ export default function Game() {
     setState('playing');
   }, [resetWorld]);
 
+  const maybeShowInterstitial = useCallback(async () => {
+    gamesSinceAdRef.current += 1;
+    try {
+      localStorage.setItem(GAMES_SINCE_AD_KEY, String(gamesSinceAdRef.current));
+    } catch {
+      /* ignore */
+    }
+    if (gamesSinceAdRef.current < INTERSTITIAL_EVERY_GAMES) {
+      void prepareInterstitialAd();
+      return;
+    }
+    gamesSinceAdRef.current = 0;
+    try {
+      localStorage.setItem(GAMES_SINCE_AD_KEY, '0');
+    } catch {
+      /* ignore */
+    }
+    setBannerOn(false);
+    await showInterstitialAd();
+    setBannerOn(true);
+    void prepareInterstitialAd();
+  }, []);
+
   const endGame = useCallback(() => {
     // Death burst
     const head = segmentsRef.current[0];
@@ -198,7 +251,7 @@ export default function Game() {
         life: 1,
         maxLife: 1,
         size: rand(2, 5),
-        color: Math.random() < 0.5 ? '#ff2bd6' : '#00e5ff',
+        color: Math.random() < 0.5 ? '#4ade80' : '#f43f5e',
         decay: rand(0.6, 1.2),
       });
     }
@@ -214,7 +267,8 @@ export default function Game() {
       setBest(Math.max(prevBest, finalScore));
     }
     setState('gameover');
-  }, []);
+    void maybeShowInterstitial();
+  }, [maybeShowInterstitial]);
 
   // ----- Input handling -----------------------------------------------------
   useEffect(() => {
@@ -345,6 +399,14 @@ export default function Game() {
 
       if (stateRef.current === 'playing') {
         updateGame(dt);
+        if (tickPlaytime(rawDt * 1000)) {
+          void (async () => {
+            setBannerOn(false);
+            await showInterstitialAd();
+            setBannerOn(true);
+            void prepareInterstitialAd();
+          })();
+        }
       }
       // Always update particles (for death burst even on gameover)
       updateParticles(rawDt);
@@ -397,7 +459,7 @@ export default function Game() {
         life: 1,
         maxLife: 1,
         size: rand(1.5, 3),
-        color: '#ff2bd6',
+        color: '#4ade80',
         decay: 1.8,
       });
     }
@@ -447,13 +509,13 @@ export default function Game() {
       if (dx * dx + dy * dy < (o.r + HEAD_R) * (o.r + HEAD_R)) {
         // Collect
         let points = 10;
-        let color = '#00e5ff';
+        let color = '#f43f5e';
         if (o.type === 'gold') {
           points = 50;
-          color = '#ffd23f';
+          color = '#fbbf24';
         } else if (o.type === 'slow') {
           points = 20;
-          color = '#8affff';
+          color = '#6ee7b7';
           slowMoRef.current = 4;
         }
         const gained = points * comboRef.current;
@@ -565,9 +627,9 @@ export default function Game() {
 
     // Dark background with subtle vignette
     const bg = ctx.createRadialGradient(cw / 2, ch / 2, 0, cw / 2, ch / 2, Math.max(cw, ch) / 1.2);
-    bg.addColorStop(0, '#140729');
-    bg.addColorStop(0.6, '#080318');
-    bg.addColorStop(1, '#03010a');
+    bg.addColorStop(0, '#143526');
+    bg.addColorStop(0.6, '#0b1a12');
+    bg.addColorStop(1, '#030a07');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, cw, ch);
 
@@ -606,16 +668,16 @@ export default function Game() {
 
   const drawBackground = (ctx: CanvasRenderingContext2D) => {
     // Play area border
-    ctx.strokeStyle = 'rgba(0, 229, 255, 0.35)';
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.35)';
     ctx.lineWidth = 2;
-    ctx.shadowColor = '#00e5ff';
+    ctx.shadowColor = '#4ade80';
     ctx.shadowBlur = 14;
     ctx.strokeRect(1, 1, GAME_W - 2, GAME_H - 2);
     ctx.shadowBlur = 0;
 
     // Animated grid
     const t = timeRef.current;
-    ctx.strokeStyle = 'rgba(255, 43, 214, 0.08)';
+    ctx.strokeStyle = 'rgba(34, 197, 94, 0.1)';
     ctx.lineWidth = 1;
     const gs = 40;
     const offset = (t * 20) % gs;
@@ -632,18 +694,18 @@ export default function Game() {
 
     // Horizon line glow
     const grad = ctx.createLinearGradient(0, 0, 0, GAME_H);
-    grad.addColorStop(0, 'rgba(255, 43, 214, 0.12)');
+    grad.addColorStop(0, 'rgba(34, 197, 94, 0.12)');
     grad.addColorStop(0.5, 'rgba(0, 0, 0, 0)');
-    grad.addColorStop(1, 'rgba(0, 229, 255, 0.12)');
+    grad.addColorStop(1, 'rgba(244, 63, 94, 0.1)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, GAME_W, GAME_H);
   };
 
   const drawWalls = (ctx: CanvasRenderingContext2D) => {
     // inner glow frame
-    ctx.strokeStyle = 'rgba(255, 43, 214, 0.5)';
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.5)';
     ctx.lineWidth = 3;
-    ctx.shadowColor = '#ff2bd6';
+    ctx.shadowColor = '#22c55e';
     ctx.shadowBlur = 20;
     ctx.strokeRect(2, 2, GAME_W - 4, GAME_H - 4);
     ctx.shadowBlur = 0;
@@ -653,8 +715,8 @@ export default function Game() {
     for (const o of orbsRef.current) {
       const pulse = 1 + Math.sin(o.phase) * 0.15;
       const color =
-        o.type === 'gold' ? '#ffd23f' : o.type === 'slow' ? '#8affff' : '#00e5ff';
-      const glow = o.type === 'gold' ? '#ff9a00' : o.type === 'slow' ? '#00e5ff' : '#ff2bd6';
+        o.type === 'gold' ? '#fbbf24' : o.type === 'slow' ? '#6ee7b7' : '#f43f5e';
+      const glow = o.type === 'gold' ? '#f59e0b' : o.type === 'slow' ? '#34d399' : '#e11d48';
       ctx.save();
       ctx.shadowColor = glow;
       ctx.shadowBlur = 22;
@@ -689,17 +751,18 @@ export default function Game() {
       const s = segs[i];
       const t = 1 - i / segs.length;
       const r = BODY_R * (0.55 + t * 0.45);
-      const hue = (i * 4 + timeRef.current * 60) % 360;
+      const tBody = 0.55 + t * 0.45;
+      const g = Math.round(120 + tBody * 80);
       ctx.save();
-      ctx.shadowColor = `hsl(${hue}, 100%, 60%)`;
-      ctx.shadowBlur = 14;
-      ctx.fillStyle = `hsl(${hue}, 95%, 55%)`;
+      ctx.shadowColor = '#4ade80';
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = `rgb(${40 + Math.round(t * 40)}, ${g}, ${70 + Math.round(t * 20)})`;
       ctx.beginPath();
       ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
       ctx.fill();
       // Inner highlight
       ctx.shadowBlur = 0;
-      ctx.fillStyle = `hsla(${hue}, 100%, 85%, 0.6)`;
+      ctx.fillStyle = 'rgba(220, 252, 231, 0.55)';
       ctx.beginPath();
       ctx.arc(s.x - r * 0.3, s.y - r * 0.3, r * 0.35, 0, Math.PI * 2);
       ctx.fill();
@@ -709,12 +772,12 @@ export default function Game() {
     // Head
     const head = segs[0];
     ctx.save();
-    ctx.shadowColor = '#ff2bd6';
+    ctx.shadowColor = '#4ade80';
     ctx.shadowBlur = 24;
     const headGrad = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, HEAD_R);
-    headGrad.addColorStop(0, '#ffffff');
-    headGrad.addColorStop(0.4, '#ff6be8');
-    headGrad.addColorStop(1, '#c10aa8');
+    headGrad.addColorStop(0, '#ecfdf5');
+    headGrad.addColorStop(0.4, '#4ade80');
+    headGrad.addColorStop(1, '#15803d');
     ctx.fillStyle = headGrad;
     ctx.beginPath();
     ctx.arc(head.x, head.y, HEAD_R, 0, Math.PI * 2);
@@ -723,7 +786,7 @@ export default function Game() {
     const eyeX = head.x + Math.cos(head.angle) * HEAD_R * 0.4;
     const eyeY = head.y + Math.sin(head.angle) * HEAD_R * 0.4;
     ctx.shadowBlur = 0;
-    ctx.fillStyle = '#05010f';
+    ctx.fillStyle = '#06120c';
     ctx.beginPath();
     ctx.arc(eyeX, eyeY, 2.5, 0, Math.PI * 2);
     ctx.fill();
@@ -765,40 +828,36 @@ export default function Game() {
   // UI
   // ===========================================================================
   return (
-    <div
-      className={`safe-area-root flex h-full w-full flex-col overflow-hidden bg-[#05010f] ${
-        Capacitor.isNativePlatform() ? 'safe-area-root--native' : ''
-      }`}
-    >
+    <div className="app-root flex w-full flex-col">
       <div ref={containerRef} className="relative min-h-0 w-full flex-1 overflow-hidden">
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
         {/* HUD (during play) */}
         {state === 'playing' && (
-          <div className="pointer-events-none absolute inset-0 p-3 sm:p-5">
-            <div className="flex items-start justify-between">
-              <div className="rounded-xl border border-cyan-400/30 bg-black/40 px-3 py-2 backdrop-blur-md">
-                <div className="text-[10px] uppercase tracking-widest text-cyan-300/80">Score</div>
-                <div className="font-mono text-2xl font-bold text-cyan-200 neon-text">{score}</div>
+          <div className="pointer-events-none absolute inset-0">
+            <div className="flex items-start justify-between px-3">
+              <div className="rounded-xl border border-emerald-400/30 bg-black/40 px-3 py-2 backdrop-blur-md">
+                <div className="text-[10px] uppercase tracking-widest text-emerald-300/80">Score</div>
+                <div className="font-mono text-2xl font-bold text-emerald-200 glow-text">{score}</div>
               </div>
               <div className="flex flex-col items-end gap-2">
                 <button
                   onClick={() => setState('paused')}
-                  className="pointer-events-auto rounded-xl border border-fuchsia-400/40 bg-black/40 px-3 py-2 text-xs uppercase tracking-widest text-fuchsia-200 backdrop-blur-md hover:bg-black/60"
+                  className="pointer-events-auto rounded-xl border border-emerald-400/40 bg-black/40 px-3 py-2 text-xs uppercase tracking-widest text-emerald-100 backdrop-blur-md"
                   aria-label="Pause"
                 >
                   ⏸ Pause
                 </button>
                 {combo > 1 && (
-                  <div className="animate-pulse-glow rounded-xl border border-yellow-400/50 bg-black/40 px-3 py-2 text-right backdrop-blur-md">
-                    <div className="text-[10px] uppercase tracking-widest text-yellow-300/80">Combo</div>
-                    <div className="font-mono text-xl font-bold text-yellow-200 neon-text">x{combo}</div>
+                  <div className="animate-pulse-glow rounded-xl border border-amber-400/50 bg-black/40 px-3 py-2 text-right backdrop-blur-md">
+                    <div className="text-[10px] uppercase tracking-widest text-amber-300/80">Combo</div>
+                    <div className="font-mono text-xl font-bold text-amber-200 glow-text">x{combo}</div>
                   </div>
                 )}
               </div>
             </div>
             {slowMoRef.current > 0 && (
-              <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full border border-cyan-300/50 bg-cyan-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-cyan-200 backdrop-blur-md">
+              <div className="absolute left-1/2 top-3 -translate-x-1/2 rounded-full border border-teal-300/50 bg-teal-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-teal-200 backdrop-blur-md">
                 Slow-Mo
               </div>
             )}
@@ -806,56 +865,44 @@ export default function Game() {
         )}
 
         {state === 'playing' && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center pb-4">
-            <Joystick onChange={handleJoystickChange} className="pointer-events-auto" />
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center">
+            <div className="flex justify-center">
+              <Joystick onChange={handleJoystickChange} className="pointer-events-auto shrink-0" />
+            </div>
+            <BannerAd enabled={bannerOn} className="w-full" />
           </div>
         )}
 
         {/* MENU */}
         {state === 'menu' && (
           <Overlay>
-            <div className="flex w-full max-w-sm flex-col items-center gap-4 text-center sm:gap-8">
+            <div className="screen-panel flex w-full max-w-sm flex-col items-center gap-9 text-center sm:gap-12">
               <div className="animate-title-glow flex flex-col items-center">
-                <div className="text-[10px] uppercase tracking-[0.5em] text-cyan-300/80 sm:text-xs">
-                  — A Neon Arcade —
+                <div className="text-[10px] uppercase tracking-[0.45em] text-emerald-300/80 sm:text-xs">
+                  Arcade
                 </div>
-                <h1 className="mt-1 bg-gradient-to-r from-fuchsia-400 via-pink-300 to-cyan-300 bg-clip-text text-4xl font-black tracking-tight text-transparent sm:mt-2 sm:text-6xl">
-                  NEON
+                <h1 className="mt-1 bg-gradient-to-r from-emerald-300 via-lime-300 to-green-400 bg-clip-text text-4xl font-black tracking-tight text-transparent sm:mt-2 sm:text-6xl">
+                  Snake
                 </h1>
-                <h1 className="-mt-1 bg-gradient-to-r from-cyan-300 via-fuchsia-300 to-pink-400 bg-clip-text text-4xl font-black tracking-tight text-transparent sm:-mt-2 sm:text-6xl">
-                  SERPENT
+                <h1 className="-mt-1 bg-gradient-to-r from-lime-300 via-emerald-400 to-teal-300 bg-clip-text text-4xl font-black tracking-tight text-transparent sm:-mt-1 sm:text-6xl">
+                  Line
                 </h1>
-                <div className="mt-2 h-[2px] w-40 bg-gradient-to-r from-transparent via-fuchsia-400 to-transparent" />
+                <div className="mt-2 h-[2px] w-40 bg-gradient-to-r from-transparent via-emerald-400 to-transparent" />
               </div>
 
-              <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
-                <button className="btn-neon primary" onClick={startGame}>
+              <div className="flex w-full flex-col gap-9 sm:w-auto sm:flex-row">
+                <button className="btn-game primary" onClick={startGame}>
                   ▶ Start
                 </button>
-                <button className="btn-neon" onClick={() => setState('scores')}>
+                <button className="btn-game" onClick={() => setState('scores')}>
                   🏆 High Scores
                 </button>
               </div>
 
-              <div className="w-full space-y-2 rounded-2xl border border-white/10 bg-black/30 p-3 text-sm text-white/70 backdrop-blur-md sm:p-4">
-                <div className="text-[10px] uppercase tracking-[0.3em] text-white/50">Controls</div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-cyan-300">⌨ Desktop</span>
-                  <span className="font-mono text-xs text-white/60">Arrows / WASD</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-fuchsia-300">🕹 Mobile</span>
-                  <span className="font-mono text-xs text-white/60">Joystick to steer</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-yellow-300">⏸ Pause</span>
-                  <span className="font-mono text-xs text-white/60">P / Esc</span>
-                </div>
-              </div>
 
               {best > 0 && (
                 <div className="text-xs uppercase tracking-[0.3em] text-white/50">
-                  Best Score: <span className="font-mono text-sm text-fuchsia-300">{best}</span>
+                  Best Score: <span className="font-mono text-sm text-emerald-300">{best}</span>
                 </div>
               )}
             </div>
@@ -865,15 +912,15 @@ export default function Game() {
         {/* PAUSE */}
         {state === 'paused' && (
           <Overlay>
-            <div className="flex w-full max-w-sm flex-col items-center gap-5 text-center sm:gap-6">
-              <h2 className="bg-gradient-to-r from-cyan-300 to-fuchsia-300 bg-clip-text text-4xl font-black tracking-tight text-transparent neon-text sm:text-5xl">
+            <div className="screen-panel flex w-full max-w-sm flex-col items-center gap-14 text-center sm:gap-12">
+              <h2 className="bg-gradient-to-r from-emerald-300 to-lime-300 bg-clip-text text-4xl font-black tracking-tight text-transparent glow-text sm:text-5xl">
                 PAUSED
               </h2>
-              <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
-                <button className="btn-neon primary" onClick={() => setState('playing')}>
+              <div className="flex w-full flex-col gap-9 sm:w-auto sm:flex-row">
+                <button className="btn-game primary" onClick={() => setState('playing')}>
                   ▶ Resume
                 </button>
-                <button className="btn-neon" onClick={() => setState('menu')}>
+                <button className="btn-game" onClick={() => setState('menu')}>
                   ✕ Main Menu
                 </button>
               </div>
@@ -884,30 +931,30 @@ export default function Game() {
         {/* GAME OVER */}
         {state === 'gameover' && (
           <Overlay>
-            <div className="flex w-full max-w-sm flex-col items-center gap-4 text-center sm:gap-6">
+            <div className="screen-panel flex w-full max-w-sm flex-col items-center gap-9 text-center sm:gap-12">
               {newBest ? (
-                <div className="animate-pulse-glow rounded-full border border-yellow-400/60 bg-yellow-400/10 px-4 py-1 text-xs uppercase tracking-[0.3em] text-yellow-300 neon-text">
+                <div className="animate-pulse-glow rounded-full border border-amber-400/60 bg-amber-400/10 px-4 py-1 text-xs uppercase tracking-[0.3em] text-amber-300 glow-text">
                   ★ New High Score ★
                 </div>
               ) : (
-                <div className="rounded-full border border-fuchsia-400/40 bg-fuchsia-400/10 px-4 py-1 text-xs uppercase tracking-[0.3em] text-fuchsia-300">
+                <div className="rounded-full border border-rose-400/40 bg-rose-400/10 px-4 py-1 text-xs uppercase tracking-[0.3em] text-rose-300">
                   Game Over
                 </div>
               )}
-              <h2 className="bg-gradient-to-r from-fuchsia-400 to-cyan-300 bg-clip-text text-5xl font-black tracking-tight text-transparent neon-text sm:text-6xl">
+              <h2 className="bg-gradient-to-r from-emerald-300 to-lime-300 bg-clip-text text-5xl font-black tracking-tight text-transparent glow-text sm:text-6xl">
                 {score}
               </h2>
               <div className="text-xs uppercase tracking-[0.3em] text-white/50">
-                Best: <span className="font-mono text-sm text-cyan-300">{Math.max(best, score)}</span>
+                Best: <span className="font-mono text-sm text-emerald-300">{Math.max(best, score)}</span>
               </div>
-              <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
-                <button className="btn-neon primary" onClick={startGame}>
+              <div className="flex w-full flex-col gap-9 sm:w-auto sm:flex-row">
+                <button className="btn-game primary" onClick={startGame}>
                   ↻ Play Again
                 </button>
-                <button className="btn-neon" onClick={() => setState('scores')}>
+                <button className="btn-game" onClick={() => setState('scores')}>
                   🏆 Scores
                 </button>
-                <button className="btn-neon" onClick={() => setState('menu')}>
+                <button className="btn-game" onClick={() => setState('menu')}>
                   ✕ Menu
                 </button>
               </div>
@@ -918,15 +965,15 @@ export default function Game() {
         {/* HIGH SCORES */}
         {state === 'scores' && (
           <Overlay>
-            <div className="flex w-full max-w-sm flex-col items-center gap-4 text-center sm:gap-5">
-              <h2 className="bg-gradient-to-r from-yellow-300 via-fuchsia-400 to-cyan-300 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
+            <div className="screen-panel flex w-full max-w-sm flex-col items-center gap-9 text-center sm:gap-12">
+              <h2 className="bg-gradient-to-r from-amber-300 via-lime-300 to-emerald-300 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
                 HIGH SCORES
               </h2>
               <div className="flex min-h-0 w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-black/40 p-4 backdrop-blur-md">
                 {highScores.length === 0 ? (
                   <div className="py-6 text-sm text-white/50">No scores yet — go make one!</div>
                 ) : (
-                  <ol className="max-h-[min(46dvh,360px)] space-y-2 overflow-y-auto overscroll-contain">
+                  <ol className="max-h-[min(38dvh,320px)] space-y-2 overflow-y-auto overscroll-contain sm:max-h-[min(46dvh,360px)]">
                     {highScores.map((h, i) => (
                       <li
                         key={i}
@@ -936,11 +983,11 @@ export default function Game() {
                           <span
                             className={`font-mono text-lg font-bold ${
                               i === 0
-                                ? 'text-yellow-300 neon-text'
+                                ? 'text-amber-300 glow-text'
                                 : i === 1
                                 ? 'text-slate-200'
                                 : i === 2
-                                ? 'text-amber-500'
+                                ? 'text-amber-600'
                                 : 'text-white/60'
                             }`}
                           >
@@ -956,11 +1003,17 @@ export default function Game() {
                   </ol>
                 )}
               </div>
-              <button className="btn-neon primary" onClick={() => setState('menu')}>
+              <button className="btn-game primary" onClick={() => setState('menu')}>
                 ← Back
               </button>
             </div>
           </Overlay>
+        )}
+
+        {(state === 'menu' || state === 'paused' || state === 'gameover' || state === 'scores') && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+            <BannerAd enabled={bannerOn} className="w-full" />
+          </div>
         )}
       </div>
     </div>
@@ -969,9 +1022,11 @@ export default function Game() {
 
 function Overlay({ children }: { children: React.ReactNode }) {
   return (
-    <div className="scanlines absolute inset-0 z-10 overflow-x-hidden overflow-y-auto overscroll-contain bg-gradient-to-b from-black/70 via-black/50 to-black/80 backdrop-blur-sm animate-float-in">
-      <div className="flex min-h-full w-full items-center justify-center px-4 py-3">
-        {children}
+    <div className="scanlines absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden bg-gradient-to-b from-black/70 via-black/50 to-black/80 backdrop-blur-sm animate-float-in">
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-x-hidden overflow-y-auto overscroll-contain">
+        <div className="flex w-full items-center justify-center px-4">
+          {children}
+        </div>
       </div>
     </div>
   );
