@@ -1,4 +1,4 @@
-package com.snakeline.game;
+package com.SnakeLine.game;
 
 import android.graphics.Color;
 import android.os.Bundle;

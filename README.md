@@ -2,7 +2,7 @@
 
 Classic snake arcade for Android (Capacitor). Steer with the on-screen joystick, collect orbs, chase high scores.
 
-**App ID:** `com.snakeline.game`  
+**App ID:** `com.SnakeLine.game`  
 **App name:** `Snake Line`
 
 ## Prerequisites

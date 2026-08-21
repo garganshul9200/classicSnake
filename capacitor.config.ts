@@ -1,7 +1,7 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.snakeline.game',
+  appId: 'com.SnakeLine.game',
   appName: 'Snake Line',
   webDir: 'dist',
   android: {
