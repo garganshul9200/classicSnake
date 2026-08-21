@@ -5,7 +5,7 @@
  * Replace ADMOB_APP_ID + AD_UNITS with your AdMob console values before release,
  * and keep them in sync with AndroidManifest APPLICATION_ID.
  */
-export const USE_TEST_ADS = true;
+export const USE_TEST_ADS = false;
 
 /** Must match AndroidManifest APPLICATION_ID. Google sample App ID while testing. */
 export const ADMOB_APP_ID = 'ca-app-pub-2848005220802634~9745228690';
